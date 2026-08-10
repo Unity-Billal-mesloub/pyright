@@ -81,6 +81,7 @@ import {
     isLiteralLikeType,
     isLiteralType,
     isLiteralTypeOrUnion,
+    isMaybeDescriptorClass,
     isMaybeDescriptorInstance,
     isMetaclassInstance,
     isNoneInstance,
@@ -96,6 +97,7 @@ import {
     mapSubtypes,
     MemberAccessFlags,
     specializeTupleClass,
+    someSubtypes,
     specializeWithUnknownTypeArgs,
     stripTypeForm,
     transformPossibleRecursiveTypeAlias,
@@ -160,23 +162,16 @@ export function getTypeNarrowingCallback(
                 testExpression.d.rightExpr.nodeType === ParseNodeType.Constant &&
                 testExpression.d.rightExpr.d.constType === KeywordType.None
             ) {
-                // Allow the LHS to be either a simple expression or an assignment
-                // expression that assigns to a simple name.
-                let leftExpression = testExpression.d.leftExpr;
-                if (leftExpression.nodeType === ParseNodeType.AssignmentExpression) {
-                    leftExpression = leftExpression.d.name;
-                }
-
-                if (
-                    ParseTreeUtils.isMatchingExpression(reference, leftExpression, (ref, expr) =>
-                        isNameSameScope(evaluator, ref, expr)
-                    )
-                ) {
+                // Allow the LHS to be a simple expression or an assignment expression.
+                // For assignment expressions, narrow both the target and the RHS
+                // (consistent with truthiness narrowing).
+                if (isMatchingExpressionOrWalrusRhs(evaluator, reference, testExpression.d.leftExpr)) {
                     return (type: Type) => {
                         return { type: narrowTypeForIsNone(evaluator, type, adjIsPositiveTest), isIncomplete: false };
                     };
                 }
 
+                const leftExpression = testExpression.d.leftExpr;
                 if (
                     leftExpression.nodeType === ParseNodeType.Index &&
                     ParseTreeUtils.isMatchingExpression(reference, leftExpression.d.leftExpr, (ref, expr) =>
@@ -204,18 +199,7 @@ export function getTypeNarrowingCallback(
 
             // Look for "X is ...", "X is not ...", "X == ...", and "X != ...".
             if (testExpression.d.rightExpr.nodeType === ParseNodeType.Ellipsis) {
-                // Allow the LHS to be either a simple expression or an assignment
-                // expression that assigns to a simple name.
-                let leftExpression = testExpression.d.leftExpr;
-                if (leftExpression.nodeType === ParseNodeType.AssignmentExpression) {
-                    leftExpression = leftExpression.d.name;
-                }
-
-                if (
-                    ParseTreeUtils.isMatchingExpression(reference, leftExpression, (ref, expr) =>
-                        isNameSameScope(evaluator, ref, expr)
-                    )
-                ) {
+                if (isMatchingExpressionOrWalrusRhs(evaluator, reference, testExpression.d.leftExpr)) {
                     return (type: Type) => {
                         return {
                             type: narrowTypeForIsEllipsis(evaluator, testExpression, type, adjIsPositiveTest),
@@ -232,11 +216,7 @@ export function getTypeNarrowingCallback(
                     testExpression.d.leftExpr.d.args[0].d.argCategory === ArgCategory.Simple
                 ) {
                     const arg0Expr = testExpression.d.leftExpr.d.args[0].d.valueExpr;
-                    if (
-                        ParseTreeUtils.isMatchingExpression(reference, arg0Expr, (ref, expr) =>
-                            isNameSameScope(evaluator, ref, expr)
-                        )
-                    ) {
+                    if (isMatchingExpressionOrWalrusRhs(evaluator, reference, arg0Expr)) {
                         const callType = evaluator.getTypeOfExpression(
                             testExpression.d.leftExpr.d.leftExpr,
                             EvalFlags.CallBaseDefaults
@@ -274,11 +254,7 @@ export function getTypeNarrowingCallback(
             }
 
             if (isOrIsNotOperator) {
-                if (
-                    ParseTreeUtils.isMatchingExpression(reference, testExpression.d.leftExpr, (ref, expr) =>
-                        isNameSameScope(evaluator, ref, expr)
-                    )
-                ) {
+                if (isMatchingExpressionOrWalrusRhs(evaluator, reference, testExpression.d.leftExpr)) {
                     const rightTypeResult = evaluator.getTypeOfExpression(testExpression.d.rightExpr);
                     const rightType = rightTypeResult.type;
 
@@ -379,11 +355,7 @@ export function getTypeNarrowingCallback(
                 const adjIsPositiveTest =
                     testExpression.d.operator === OperatorType.Equals ? isPositiveTest : !isPositiveTest;
 
-                if (
-                    ParseTreeUtils.isMatchingExpression(reference, testExpression.d.leftExpr, (ref, expr) =>
-                        isNameSameScope(evaluator, ref, expr)
-                    )
-                ) {
+                if (isMatchingExpressionOrWalrusRhs(evaluator, reference, testExpression.d.leftExpr)) {
                     const rightTypeResult = evaluator.getTypeOfExpression(testExpression.d.rightExpr);
                     const rightType = rightTypeResult.type;
 
@@ -613,11 +585,7 @@ export function getTypeNarrowingCallback(
 
         if (testExpression.d.operator === OperatorType.In || testExpression.d.operator === OperatorType.NotIn) {
             // Look for "x in y" or "x not in y" where y is one of several built-in types.
-            if (
-                ParseTreeUtils.isMatchingExpression(reference, testExpression.d.leftExpr, (ref, expr) =>
-                    isNameSameScope(evaluator, ref, expr)
-                )
-            ) {
+            if (isMatchingExpressionOrWalrusRhs(evaluator, reference, testExpression.d.leftExpr)) {
                 const rightTypeResult = evaluator.getTypeOfExpression(testExpression.d.rightExpr);
                 const rightType = rightTypeResult.type;
                 const adjIsPositiveTest =
@@ -669,11 +637,7 @@ export function getTypeNarrowingCallback(
             const arg0Expr = testExpression.d.args[0].d.valueExpr;
             const arg1Expr = testExpression.d.args[1].d.valueExpr;
 
-            if (
-                ParseTreeUtils.isMatchingExpression(reference, arg0Expr, (ref, expr) =>
-                    isNameSameScope(evaluator, ref, expr)
-                )
-            ) {
+            if (isMatchingExpressionOrWalrusRhs(evaluator, reference, arg0Expr)) {
                 const callTypeResult = evaluator.getTypeOfExpression(
                     testExpression.d.leftExpr,
                     EvalFlags.CallBaseDefaults
@@ -719,11 +683,7 @@ export function getTypeNarrowingCallback(
 
         // Look for "bool(X)"
         if (testExpression.d.args.length === 1 && !testExpression.d.args[0].d.name) {
-            if (
-                ParseTreeUtils.isMatchingExpression(reference, testExpression.d.args[0].d.valueExpr, (ref, expr) =>
-                    isNameSameScope(evaluator, ref, expr)
-                )
-            ) {
+            if (isMatchingExpressionOrWalrusRhs(evaluator, reference, testExpression.d.args[0].d.valueExpr)) {
                 const callTypeResult = evaluator.getTypeOfExpression(
                     testExpression.d.leftExpr,
                     EvalFlags.CallBaseDefaults
@@ -744,11 +704,7 @@ export function getTypeNarrowingCallback(
         // Look for a TypeGuard function.
         if (testExpression.d.args.length >= 1) {
             const arg0Expr = testExpression.d.args[0].d.valueExpr;
-            if (
-                ParseTreeUtils.isMatchingExpression(reference, arg0Expr, (ref, expr) =>
-                    isNameSameScope(evaluator, ref, expr)
-                )
-            ) {
+            if (isMatchingExpressionOrWalrusRhs(evaluator, reference, arg0Expr)) {
                 // Does this look like it's a custom type guard function?
                 let isPossiblyTypeGuard = false;
 
@@ -1079,6 +1035,32 @@ function narrowTupleTypeForIsNone(evaluator: TypeEvaluator, type: Type, isPositi
     });
 }
 
+// Walks a chain of NewType instances down to the innermost non-NewType base
+// instance (e.g. NewType("Y", NewType("X", bool)) -> an instance of bool).
+// Returns undefined if `subtype` is not a NewType instance or its base cannot
+// be resolved to a class.
+function getInnermostNewTypeBaseInstance(subtype: Type): Type | undefined {
+    if (!isClassInstance(subtype) || !ClassType.isNewTypeClass(subtype)) {
+        return undefined;
+    }
+
+    let currentType: Type = subtype;
+    while (isClassInstance(currentType) && ClassType.isNewTypeClass(currentType)) {
+        if (currentType.shared.baseClasses.length === 0) {
+            return undefined;
+        }
+
+        const baseClass = currentType.shared.baseClasses[0];
+        if (!isClass(baseClass)) {
+            return undefined;
+        }
+
+        currentType = ClassType.cloneAsInstance(baseClass);
+    }
+
+    return currentType;
+}
+
 // Handle type narrowing for expressions of the form "x is None" and "x is not None".
 function narrowTypeForIsNone(evaluator: TypeEvaluator, type: Type, isPositiveTest: boolean) {
     const expandedType = mapSubtypes(type, (subtype) => {
@@ -1092,8 +1074,13 @@ function narrowTypeForIsNone(evaluator: TypeEvaluator, type: Type, isPositiveTes
         /* options */ undefined,
         (subtype, unexpandedSubtype) => {
             if (isAnyOrUnknown(subtype)) {
-                // Assume that "Any" is always both None and not None, so it matches
-                // regardless of whether the test is positive or negative.
+                // Narrow to None in positive tests, matching the behavior of other
+                // narrowing functions (narrowTypeForInstanceOrSubclass, narrowTypeForLiteralComparison).
+                if (isPositiveTest) {
+                    resultIncludesNoneSubtype = true;
+                    return addConditionToType(evaluator.getNoneType(), subtype.props?.condition);
+                }
+                // For negative tests, keep the original type.
                 return subtype;
             }
 
@@ -1121,6 +1108,18 @@ function narrowTypeForIsNone(evaluator: TypeEvaluator, type: Type, isPositiveTes
 
             const adjustedSubtype = useExpandedSubtype ? subtype : unexpandedSubtype;
 
+            // A NewType whose innermost base is exactly None (e.g. NewType("Apple", NoneType))
+            // can be identity-compared with None: keep the NewType identity on the positive
+            // branch and eliminate it on the negative branch. A NewType whose base is merely
+            // None-compatible (e.g. NewType("Obj", object)) is intentionally not handled here;
+            // it falls through to the generic checks below so that "is not None" does not
+            // incorrectly collapse to Never.
+            const newTypeBaseInstance = getInnermostNewTypeBaseInstance(adjustedSubtype);
+            if (newTypeBaseInstance && isNoneInstance(newTypeBaseInstance)) {
+                resultIncludesNoneSubtype = true;
+                return isPositiveTest ? adjustedSubtype : undefined;
+            }
+
             // Is it an exact match for None?
             if (isNoneInstance(subtype)) {
                 resultIncludesNoneSubtype = true;
@@ -1144,7 +1143,8 @@ function narrowTypeForIsNone(evaluator: TypeEvaluator, type: Type, isPositiveTes
     // of the subtypes are None types with conditions, retain those.
     if (isPositiveTest && resultIncludesNoneSubtype) {
         return mapSubtypes(result, (subtype) => {
-            return isNoneInstance(subtype) ? subtype : undefined;
+            const baseInstance = getInnermostNewTypeBaseInstance(subtype);
+            return isNoneInstance(subtype) || (baseInstance && isNoneInstance(baseInstance)) ? subtype : undefined;
         });
     }
 
@@ -1186,6 +1186,15 @@ function narrowTypeForIsEllipsis(evaluator: TypeEvaluator, node: ExpressionNode,
                     ? unexpandedSubtype
                     : subtype;
 
+            // Only a NewType whose innermost base is exactly the ellipsis type is treated
+            // as the singleton (see narrowTypeForIsNone for the rationale); a merely
+            // ellipsis-compatible base falls through so "is not ..." does not collapse to Never.
+            const newTypeBaseInstance = getInnermostNewTypeBaseInstance(adjustedSubtype);
+            if (newTypeBaseInstance && isEllipsisInstance(newTypeBaseInstance)) {
+                resultIncludesEllipsisSubtype = true;
+                return isPositiveTest ? adjustedSubtype : undefined;
+            }
+
             // Is it an exact match for ellipsis?
             if (isEllipsisInstance(subtype)) {
                 resultIncludesEllipsisSubtype = true;
@@ -1207,7 +1216,10 @@ function narrowTypeForIsEllipsis(evaluator: TypeEvaluator, node: ExpressionNode,
     // of the subtypes are ellipsis types with conditions, retain those.
     if (isPositiveTest && resultIncludesEllipsisSubtype) {
         return mapSubtypes(result, (subtype) => {
-            return isEllipsisInstance(subtype) ? subtype : undefined;
+            const baseInstance = getInnermostNewTypeBaseInstance(subtype);
+            return isEllipsisInstance(subtype) || (baseInstance && isEllipsisInstance(baseInstance))
+                ? subtype
+                : undefined;
         });
     }
 
@@ -2420,7 +2432,7 @@ export function narrowTypeForDiscriminatedLiteralFieldComparison(
             // that has a declared literal return type for its getter.
             if (isClassInstance(subtype) && isClassInstance(memberType) && isProperty(memberType)) {
                 const getterType = memberType.priv.fgetInfo?.methodType;
-                if (getterType && getterType.shared.declaredReturnType) {
+                if (getterType && isFunction(getterType) && getterType.shared.declaredReturnType) {
                     const getterReturnType = FunctionType.getEffectiveReturnType(getterType);
                     if (getterReturnType) {
                         memberType = getterReturnType;
@@ -2461,17 +2473,39 @@ function narrowTypeForDiscriminatedFieldNoneComparison(
         }
 
         if (memberInfo && memberInfo.isTypeDeclared) {
+            // Check the declared type before narrowing, since the member type
+            // below will be concretized and lose descriptor identity.
+            const declaredType = evaluator.getDeclaredTypeOfSymbol(memberInfo.symbol)?.type;
+            if (!declaredType) {
+                // isTypeDeclared is true but the type couldn't be resolved (e.g. an
+                // unresolvable stub).  Conservatively skip narrowing rather than risk
+                // incorrectly eliminating a descriptor-typed member.
+                return subtype;
+            }
+            // Check if any subtype of the declared type is a descriptor or property.
+            // isMaybeDescriptorInstance handles declared types in instance form (ClassInstance),
+            // while isMaybeDescriptorClass handles declared types in instantiable form
+            // (InstantiableClass), which occurs when the annotation refers to the class object itself.
+            // This check applies to both positive and negative test paths: descriptor __get__
+            // return values don't reflect stored values regardless of test polarity.
+            const isDescriptorOrProperty = someSubtypes(
+                declaredType,
+                (declaredSubtype) =>
+                    isProperty(declaredSubtype) ||
+                    isMaybeDescriptorInstance(declaredSubtype) ||
+                    isMaybeDescriptorClass(declaredSubtype)
+            );
+
+            if (isDescriptorOrProperty) {
+                return subtype;
+            }
+
             const memberType = evaluator.makeTopLevelTypeVarsConcrete(evaluator.getTypeOfMember(memberInfo));
             let canNarrow = true;
 
             if (isPositiveTest) {
                 doForEachSubtype(memberType, (memberSubtype) => {
                     memberSubtype = evaluator.makeTopLevelTypeVarsConcrete(memberSubtype);
-
-                    // Don't attempt to narrow if the member is a descriptor or property.
-                    if (isProperty(memberSubtype) || isMaybeDescriptorInstance(memberSubtype)) {
-                        canNarrow = false;
-                    }
 
                     if (isAnyOrUnknown(memberSubtype) || isNoneInstance(memberSubtype) || isNever(memberSubtype)) {
                         canNarrow = false;
@@ -2712,8 +2746,13 @@ function narrowTypeForLiteralComparison(
             }
 
             if (isIsOperator || isNoneInstance(subtype)) {
-                const isSubtype = evaluator.assignType(subtype, literalType);
-                return isSubtype ? literalType : undefined;
+                const compareType = getInnermostNewTypeBaseInstance(subtype) ?? subtype;
+
+                const isSubtype = evaluator.assignType(compareType, literalType);
+                if (isSubtype) {
+                    return isClassInstance(subtype) && ClassType.isNewTypeClass(subtype) ? subtype : literalType;
+                }
+                return undefined;
             }
         }
 
@@ -2781,4 +2820,25 @@ function isNameSameScope(evaluator: TypeEvaluator, reference: NameNode, expressi
     }
 
     return isScopeContainedWithin(refScope, exprScope);
+}
+
+// Matches a reference against an expression, including the RHS of an assignment
+// expression. This keeps walrus narrowing consistent with truthiness handling in
+// getTypeNarrowingCallbackForAssignmentExpression.
+function isMatchingExpressionOrWalrusRhs(
+    evaluator: TypeEvaluator,
+    reference: ExpressionNode,
+    expression: ExpressionNode
+): boolean {
+    const compareName = (ref: NameNode, expr: NameNode) => isNameSameScope(evaluator, ref, expr);
+
+    if (ParseTreeUtils.isMatchingExpression(reference, expression, compareName)) {
+        return true;
+    }
+
+    if (expression.nodeType === ParseNodeType.AssignmentExpression) {
+        return ParseTreeUtils.isMatchingExpression(reference, expression.d.rightExpr, compareName);
+    }
+
+    return false;
 }

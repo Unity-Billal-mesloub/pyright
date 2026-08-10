@@ -333,6 +333,12 @@ test('TypeNarrowingIsNone2', () => {
     TestUtils.validateResults(analysisResults, 0);
 });
 
+test('TypeNarrowingAny1', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeNarrowingAny1.py']);
+
+    TestUtils.validateResults(analysisResults, 0);
+});
+
 test('TypeNarrowingIsClass1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeNarrowingIsClass1.py']);
 
@@ -789,6 +795,12 @@ test('Lambda15', () => {
     TestUtils.validateResults(analysisResults, 0);
 });
 
+test('Lambda16', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['lambda16.py']);
+
+    TestUtils.validateResults(analysisResults, 1);
+});
+
 test('Call1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['call1.py']);
 
@@ -957,6 +969,12 @@ test('KwargsUnpack1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['kwargsUnpack1.py']);
 
     TestUtils.validateResults(analysisResults, 13);
+});
+
+test('KwargsUnpack2', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['kwargsUnpack2.py']);
+
+    TestUtils.validateResults(analysisResults, 2);
 });
 
 test('FunctionMember1', () => {

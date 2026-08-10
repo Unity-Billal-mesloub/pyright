@@ -11,7 +11,7 @@
 import * as assert from 'assert';
 
 import { ConfigOptions } from '../common/configOptions';
-import { pythonVersion3_10, pythonVersion3_11, pythonVersion3_8 } from '../common/pythonVersion';
+import { pythonVersion3_10, pythonVersion3_11, pythonVersion3_8, pythonVersion3_12 } from '../common/pythonVersion';
 import { Uri } from '../common/uri/uri';
 import * as TestUtils from './testUtils';
 
@@ -195,6 +195,18 @@ test('CodeFlow9', () => {
     TestUtils.validateResults(analysisResults, 0);
 });
 
+test('CodeFlow10', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['codeFlow10.py']);
+
+    TestUtils.validateResults(analysisResults, 0, 0, 2); /* 2 reveal_type infos */
+});
+
+test('CodeFlow11', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['codeFlow11.py']);
+
+    TestUtils.validateResults(analysisResults, 4, 0, 4);
+});
+
 test('CapturedVariable1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['capturedVariable1.py']);
 
@@ -323,6 +335,53 @@ test('Property18', () => {
     TestUtils.validateResults(analysisResults, 0);
 });
 
+test('Property19', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['property19.py']);
+
+    TestUtils.validateResults(analysisResults, 1);
+});
+
+test('Property20', () => {
+    const configOptions = new ConfigOptions(Uri.empty());
+
+    const analysisResults1 = TestUtils.typeAnalyzeSampleFiles(['property20.py'], configOptions);
+    TestUtils.validateResults(analysisResults1, 0, 0, 0, undefined, undefined, 1);
+
+    configOptions.diagnosticRuleSet.reportDeprecated = 'error';
+    const analysisResults2 = TestUtils.typeAnalyzeSampleFiles(['property20.py'], configOptions);
+    TestUtils.validateResults(analysisResults2, 1);
+});
+
+test('Property21', () => {
+    const configOptions = new ConfigOptions(Uri.empty());
+
+    const analysisResults1 = TestUtils.typeAnalyzeSampleFiles(['property21.py'], configOptions);
+    TestUtils.validateResults(analysisResults1, 0, 0, 0, undefined, undefined, 2);
+
+    configOptions.diagnosticRuleSet.reportDeprecated = 'error';
+    const analysisResults2 = TestUtils.typeAnalyzeSampleFiles(['property21.py'], configOptions);
+    TestUtils.validateResults(analysisResults2, 2);
+});
+
+test('Property22', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['property22.py']);
+
+    TestUtils.validateResults(analysisResults, 1);
+});
+
+test('Property23', () => {
+    const configOptions = new ConfigOptions(Uri.empty());
+    configOptions.diagnosticRuleSet.reportIncompatibleMethodOverride = 'error';
+
+    // Override-compatibility checking is not yet performed for overloaded
+    // property accessors, so the incompatible setter override in this sample
+    // is intentionally not reported. Update this expectation when override
+    // support for overloaded accessors is added.
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['property23.py'], configOptions);
+
+    TestUtils.validateResults(analysisResults, 0);
+});
+
 test('Operator1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['operator1.py']);
 
@@ -446,7 +505,7 @@ test('Optional2', () => {
 test('Tuple1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['tuple1.py']);
 
-    TestUtils.validateResults(analysisResults, 26);
+    TestUtils.validateResults(analysisResults, 27);
 });
 
 test('Tuple2', () => {
@@ -617,6 +676,14 @@ test('NamedTuple11', () => {
     TestUtils.validateResults(analysisResults, 3);
 });
 
+test('NamedTuple12', () => {
+    const configOptions = new ConfigOptions(Uri.empty());
+    configOptions.defaultPythonVersion = pythonVersion3_12;
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['matchNamedTupleGeneric1.py'], configOptions);
+
+    TestUtils.validateResults(analysisResults, 0);
+});
+
 test('Slots1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['slots1.py']);
 
@@ -749,6 +816,12 @@ test('Descriptor3', () => {
     TestUtils.validateResults(analysisResults, 0);
 });
 
+test('Descriptor4', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['descriptor4.py']);
+
+    TestUtils.validateResults(analysisResults, 0);
+});
+
 test('Partial1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['partial1.py']);
 
@@ -801,6 +874,12 @@ test('TotalOrdering1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['totalOrdering1.py']);
 
     TestUtils.validateResults(analysisResults, 5);
+});
+
+test('StructUnpack1', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['structUnpack1.py']);
+
+    TestUtils.validateResults(analysisResults, 0);
 });
 
 test('TupleUnpack1', () => {
@@ -945,6 +1024,12 @@ test('StaticExpression2', () => {
     TestUtils.validateResults(analysisResults, 0);
 });
 
+test('StaticExpressionLiteral1', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['staticExpressionLiteral1.py']);
+
+    TestUtils.validateResults(analysisResults, 4);
+});
+
 test('SpecialForm1', () => {
     const analysisResults = TestUtils.typeAnalyzeSampleFiles(['specialForm1.py']);
 
@@ -969,58 +1054,53 @@ test('SpecialForm4', () => {
     TestUtils.validateResults(analysisResults, 72);
 });
 
+// TypeForm support is enabled by default and no longer requires
+// enableExperimentalFeatures, so these tests intentionally leave it off.
+
 test('TypeForm1', () => {
-    const configOptions = new ConfigOptions(Uri.empty());
-    configOptions.diagnosticRuleSet.enableExperimentalFeatures = true;
-    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm1.py'], configOptions);
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm1.py']);
 
     TestUtils.validateResults(analysisResults, 4);
 });
 
 test('TypeForm2', () => {
-    const configOptions = new ConfigOptions(Uri.empty());
-    configOptions.diagnosticRuleSet.enableExperimentalFeatures = true;
-    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm2.py'], configOptions);
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm2.py']);
 
     TestUtils.validateResults(analysisResults, 0);
 });
 
 test('TypeForm3', () => {
-    const configOptions = new ConfigOptions(Uri.empty());
-    configOptions.diagnosticRuleSet.enableExperimentalFeatures = true;
-    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm3.py'], configOptions);
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm3.py']);
 
     TestUtils.validateResults(analysisResults, 0);
 });
 
 test('TypeForm4', () => {
-    const configOptions = new ConfigOptions(Uri.empty());
-    configOptions.diagnosticRuleSet.enableExperimentalFeatures = true;
-    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm4.py'], configOptions);
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm4.py']);
 
     TestUtils.validateResults(analysisResults, 27);
 });
 
 test('TypeForm5', () => {
-    const configOptions = new ConfigOptions(Uri.empty());
-    configOptions.diagnosticRuleSet.enableExperimentalFeatures = true;
-    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm5.py'], configOptions);
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm5.py']);
 
     TestUtils.validateResults(analysisResults, 0);
 });
 
 test('TypeForm6', () => {
-    const configOptions = new ConfigOptions(Uri.empty());
-    configOptions.diagnosticRuleSet.enableExperimentalFeatures = true;
-    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm6.py'], configOptions);
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm6.py']);
 
     TestUtils.validateResults(analysisResults, 8);
 });
 
 test('TypeForm7', () => {
-    const configOptions = new ConfigOptions(Uri.empty());
-    configOptions.diagnosticRuleSet.enableExperimentalFeatures = true;
-    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm7.py'], configOptions);
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm7.py']);
 
     TestUtils.validateResults(analysisResults, 1);
+});
+
+test('TypeForm8', () => {
+    const analysisResults = TestUtils.typeAnalyzeSampleFiles(['typeForm8.py']);
+
+    TestUtils.validateResults(analysisResults, 2);
 });

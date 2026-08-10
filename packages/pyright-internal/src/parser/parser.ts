@@ -25,6 +25,7 @@ import {
     pythonVersion3_12,
     pythonVersion3_13,
     pythonVersion3_14,
+    pythonVersion3_15,
     pythonVersion3_3,
     pythonVersion3_5,
     pythonVersion3_6,
@@ -232,6 +233,8 @@ const maxChildNodeDepth = 256;
 export class Parser {
     private _fileContents?: string;
     private _tokenizerOutput?: TokenizerOutput;
+    private _tokens?: TextRangeCollection<Token>;
+    private _tokenCount = 0;
     private _tokenIndex = 0;
     private _areErrorsSuppressed = false;
     private _parseOptions: ParseOptions = new ParseOptions();
@@ -406,6 +409,8 @@ export class Parser {
             initialParenDepth,
             this._parseOptions.useNotebookMode
         );
+        this._tokens = this._tokenizerOutput.tokens;
+        this._tokenCount = this._tokens.count;
         this._tokenIndex = 0;
     }
 
@@ -509,6 +514,35 @@ export class Parser {
         this._addSyntaxError(LocMessage.unexpectedAsyncToken(), asyncToken);
 
         return undefined;
+    }
+
+    // lazy_import_stmt: "lazy" import_stmt | "lazy" from_import_stmt
+    private _parseLazyImportStatement(): ImportNode | ImportFromNode {
+        const lazyToken = this._getKeywordToken(KeywordType.Lazy);
+
+        if (!this._parseOptions.isStubFile && PythonVersion.isLessThan(this._getLanguageVersion(), pythonVersion3_15)) {
+            this._addSyntaxError(LocMessage.lazyImportIllegal(), lazyToken);
+        }
+
+        const nextToken = this._peekToken();
+        let node: ImportNode | ImportFromNode;
+
+        if (nextToken.type === TokenType.Keyword && (nextToken as KeywordToken).keywordType === KeywordType.From) {
+            node = this._parseFromStatement();
+        } else {
+            node = this._parseImportStatement();
+        }
+
+        node.d.isLazy = true;
+        node.d.lazyToken = lazyToken as KeywordToken;
+        extendRange(node, lazyToken);
+
+        // PEP 810 disallows wildcard imports with 'lazy'.
+        if (node.nodeType === ParseNodeType.ImportFrom && node.d.isWildcardImport) {
+            this._addSyntaxError(LocMessage.lazyImportWildcardIllegal(), node.d.wildcardToken ?? lazyToken);
+        }
+
+        return node;
     }
 
     // type_alias_stmt: "type" name [type_param_seq] = expr
@@ -3116,6 +3150,20 @@ export class Parser {
             case KeywordType.Yield:
                 return this._parseYieldExpression();
 
+            case KeywordType.Lazy: {
+                // Lazy is considered a "soft" keyword, so we will treat it
+                // as an identifier if it is not followed by "import" or "from".
+                const peekToken1 = this._peekToken(1);
+                if (
+                    peekToken1.type === TokenType.Keyword &&
+                    ((peekToken1 as KeywordToken).keywordType === KeywordType.Import ||
+                        (peekToken1 as KeywordToken).keywordType === KeywordType.From)
+                ) {
+                    return this._parseLazyImportStatement();
+                }
+                break;
+            }
+
             case KeywordType.Type: {
                 // Type is considered a "soft" keyword, so we will treat it
                 // as an identifier if it is followed by an unexpected token.
@@ -4318,7 +4366,16 @@ export class Parser {
             if (this._consumeTokenIfOperator(OperatorType.Power)) {
                 doubleStarExpression = this._parseExpression(/* allowUnpack */ false);
             } else {
+                // A dictionary key is never a forward-reference type annotation, even
+                // when the dictionary appears within a type annotation (e.g. the field
+                // names of an inline TypedDict such as `TypedDict[{'x': int}]`). Suspend
+                // type-annotation parsing for the key so its string isn't parsed into a
+                // forward-reference expression. The value remains a type annotation and
+                // must continue to allow forward references.
+                const wasParsingTypeAnnotation = this._isParsingTypeAnnotation;
+                this._isParsingTypeAnnotation = false;
                 keyExpression = this._parseTestOrStarExpression(/* allowAssignmentExpression */ true);
+                this._isParsingTypeAnnotation = wasParsingTypeAnnotation;
 
                 // Allow walrus operators in this context only for Python 3.10 and newer.
                 // Older versions of Python generated a syntax error in this context.
@@ -5259,7 +5316,7 @@ export class Parser {
     }
 
     private _getNextToken(): Token {
-        const token = this._tokenizerOutput!.tokens.getItemAt(this._tokenIndex);
+        const token = this._tokens!.getItemAt(this._tokenIndex);
         if (!this._atEof()) {
             this._tokenIndex++;
         }
@@ -5270,19 +5327,20 @@ export class Parser {
     private _atEof(): boolean {
         // Are we pointing at the last token in the stream (which is
         // assumed to be an end-of-stream token)?
-        return this._tokenIndex >= this._tokenizerOutput!.tokens.count - 1;
+        return this._tokenIndex >= this._tokenCount - 1;
     }
 
     private _peekToken(count = 0): Token {
-        if (this._tokenIndex + count < 0) {
-            return this._tokenizerOutput!.tokens.getItemAt(0);
+        const targetIndex = this._tokenIndex + count;
+        if (targetIndex < 0) {
+            return this._tokens!.getItemAt(0);
         }
 
-        if (this._tokenIndex + count >= this._tokenizerOutput!.tokens.count) {
-            return this._tokenizerOutput!.tokens.getItemAt(this._tokenizerOutput!.tokens.count - 1);
+        if (targetIndex >= this._tokenCount) {
+            return this._tokens!.getItemAt(this._tokenCount - 1);
         }
 
-        return this._tokenizerOutput!.tokens.getItemAt(this._tokenIndex + count);
+        return this._tokens!.getItemAt(targetIndex);
     }
 
     private _peekTokenType(): TokenType {

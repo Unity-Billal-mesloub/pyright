@@ -99,6 +99,11 @@ export function getImportGroup(statement: ImportStatement): ImportGroup {
 
         return ImportGroup.Local;
     } else {
+        // If we couldn't resolve the import, infer relative-ness from syntax.
+        if (statement.node.nodeType === ParseNodeType.ImportFrom && statement.node.d.module.d.leadingDots > 0) {
+            return ImportGroup.LocalRelative;
+        }
+
         return ImportGroup.Local;
     }
 }
@@ -442,6 +447,21 @@ function _getInsertionEditsForAutoImportInsertion(
 ): InsertionEdit[] {
     const insertionEdits: InsertionEdit[] = [];
 
+    // The module is emitted in relative form when a leading-dot name is supplied via
+    // nameForImportFrom (Pylance does this for local imports when importFormat is "relative").
+    // getImportGroupFromModuleNameAndType cannot return LocalRelative, so we derive relative-ness
+    // here and use it for both the import group (placement) and the sort key (ordering).
+    const isRelativeInsert = moduleNameInfo.nameForImportFrom?.startsWith('.') ?? false;
+
+    // Place a relative import in the relative-local group so it is grouped below the
+    // absolute-local imports instead of being sorted in among them. A leading-dot import is
+    // always local-relative, so this normalization applies regardless of the import group the
+    // caller derived from the module name/type (which can differ for unresolvable modules,
+    // e.g. a module under an invalid-identifier directory may classify as Local or ThirdParty).
+    if (isRelativeInsert) {
+        importGroup = ImportGroup.LocalRelative;
+    }
+
     importNameInfo = Array.isArray(importNameInfo) ? importNameInfo : [importNameInfo];
     if (importNameInfo.length === 0) {
         // This will let "import [moduleName]" to be generated.
@@ -482,11 +502,17 @@ function _getInsertionEditsForAutoImportInsertion(
             .sort((a, b) => _compareImportNames(a.sortText, b.sortText))
             .reduce((set, v) => addIfUnique(set, v.text), [] as string[]);
 
+        // When emitting a relative import, sort it against the existing imports using its
+        // relative (leading-dot) module name. Existing relative imports are keyed by their
+        // dotted module name (see formatModuleName), so comparing against the bare absolute
+        // name here would place the new import out of order within the relative group.
+        const comparisonModuleName = isRelativeInsert ? moduleNameInfo.nameForImportFrom! : moduleNameInfo.name;
+
         insertionEdits.push(
             _getInsertionEditForAutoImportInsertion(
                 importStatementGetter(importNames),
                 importStatements,
-                moduleNameInfo.name,
+                comparisonModuleName,
                 importGroup,
                 parseFileResults,
                 invocationPosition
@@ -568,6 +594,12 @@ function _getInsertionEditForAutoImportInsertion(
         if (insertionImport) {
             if (insertBefore) {
                 postChange = postChange + parseFileResults.tokenizerOutput.predominantEndOfLineSequence;
+
+                // If we're inserting before an import in a different group (e.g. inserting a built-in import
+                // before a local import), we need an extra newline to preserve the blank line between groups.
+                if (getImportGroup(insertionImport) !== importGroup) {
+                    postChange = postChange + parseFileResults.tokenizerOutput.predominantEndOfLineSequence;
+                }
             } else {
                 preChange = parseFileResults.tokenizerOutput.predominantEndOfLineSequence + preChange;
             }

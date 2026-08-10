@@ -58,6 +58,7 @@ import {
     isNever,
     isSameWithoutLiteralValue,
     isTypeSame,
+    isTypeVar,
     isTypeVarTuple,
     isUnknown,
     isUnpackedTypeVar,
@@ -70,6 +71,7 @@ import {
     doForEachSubtype,
     getTypeCondition,
     getTypeVarScopeIds,
+    getUnknownForTypeVar,
     getUnknownTypeForCallable,
     isLiteralType,
     isLiteralTypeOrUnion,
@@ -680,7 +682,8 @@ function narrowTypeBasedOnLiteralPattern(
                 isLiteralType(literalType) &&
                 isClassInstance(expandedSubtype) &&
                 isLiteralType(expandedSubtype) &&
-                evaluator.assignType(literalType, expandedSubtype)
+                (evaluator.assignType(literalType, expandedSubtype) ||
+                    isIntLiteralPatternEqualToBool(literalType, expandedSubtype))
             ) {
                 return undefined;
             }
@@ -706,6 +709,16 @@ function narrowTypeBasedOnLiteralPattern(
     }
 
     return evaluator.mapSubtypesExpandTypeVars(type, /* options */ undefined, (expandedSubtype, unexpandedSubtype) => {
+        if (
+            isClassInstance(literalType) &&
+            isLiteralType(literalType) &&
+            isClassInstance(expandedSubtype) &&
+            isLiteralType(expandedSubtype) &&
+            isIntLiteralPatternEqualToBool(literalType, expandedSubtype)
+        ) {
+            return expandedSubtype;
+        }
+
         if (evaluator.assignType(expandedSubtype, literalType)) {
             // We have to be careful here because the runtime uses an equality
             // check, but the expandedSubtype could be a superclass that is not
@@ -741,6 +754,65 @@ function narrowTypeBasedOnLiteralPattern(
         }
         return undefined;
     });
+}
+
+function isIntLiteralPatternEqualToBool(patternType: ClassType, subjectType: ClassType): boolean {
+    // Numeric literal patterns use equality, so 0 and 1 also match False and True.
+    // The inverse isn't true because singleton bool patterns use identity.
+    if (!ClassType.isBuiltIn(patternType, 'int') || !ClassType.isBuiltIn(subjectType, 'bool')) {
+        return false;
+    }
+
+    const patternValue = patternType.priv.literalValue;
+    const subjectValue = subjectType.priv.literalValue;
+    if ((typeof patternValue !== 'number' && typeof patternValue !== 'bigint') || typeof subjectValue !== 'boolean') {
+        return false;
+    }
+
+    const boolAsNumber = subjectValue ? 1 : 0;
+    return typeof patternValue === 'bigint' ? patternValue === BigInt(boolAsNumber) : patternValue === boolAsNumber;
+}
+
+// When a class pattern matches a generic class whose type parameters have an
+// upper bound (e.g. `class Thing[T: bool]`), the constraint solver may leave the
+// parameters unsolved (Unknown) because the subject carries no type arguments.
+// Rather than surfacing Unknown, fall back to each parameter's bound while
+// preserving any argument that was concretely solved. The subject's condition is
+// reapplied to the resulting instance.
+function specializeBoundedMatchTypeParams(
+    evaluator: TypeEvaluator,
+    matchType: ClassType,
+    solvedTypeArgs: Type[] | undefined,
+    condition: ReturnType<typeof getTypeCondition>
+): Type {
+    // `solvedTypeArgs` is indexed by `matchType`'s own type parameters, so the
+    // caller must align it to the pattern class (e.g. pass `resultType.priv.typeArgs`
+    // where `resultType` is the same generic class). The subject's own type arguments
+    // must not be used here: the subject may be a different generic class (e.g. a
+    // generic supertype), and indexing it by the pattern class's parameters would
+    // misread unrelated arguments.
+    const typeArgs = matchType.shared.typeParams.map((param, index) => {
+        const specializedArg = solvedTypeArgs?.[index];
+
+        // Keep an argument unless it is the unsolved sentinel (a bare top-level
+        // Unknown left by the constraint solver when the subject carried no type
+        // arguments). A concrete argument that is merely implicitly parameterized -
+        // e.g. bare `list` (`list[Unknown]`) or `dict` (`dict[Unknown, Unknown]`) - is
+        // a real, solved type and must be preserved rather than widened to the bound.
+        // A bare in-scope TypeVar (e.g. a subject `Thing[S]` from a generic function
+        // `def f[S: bool]`) is likewise a legitimately narrowed argument.
+        if (specializedArg && !isUnknown(specializedArg)) {
+            return specializedArg;
+        }
+
+        if (isTypeVar(param) && param.shared.boundType) {
+            return convertToInstance(param.shared.boundType);
+        }
+
+        return specializedArg ?? getUnknownForTypeVar(param, evaluator.getTupleClassType());
+    });
+
+    return addConditionToType(convertToInstance(ClassType.specialize(matchType, typeArgs)), condition);
 }
 
 function narrowTypeBasedOnClassPattern(
@@ -1024,6 +1096,28 @@ function narrowTypeBasedOnClassPattern(
                             }
                         } else {
                             return undefined;
+                        }
+
+                        // For a generic class pattern whose type parameters are bounded
+                        // (e.g. `class Thing[T: bool]`), the subject may carry no type arguments,
+                        // leaving the parameters unsolved. Fall back to each parameter's bound -
+                        // but only for the pattern class itself. When the subject narrowed to a
+                        // proper subclass of the pattern class, its own type arguments must be
+                        // preserved rather than rebuilt from the (widened) base.
+                        if (
+                            isClassInstance(resultType) &&
+                            isInstantiableClass(unexpandedSubtype) &&
+                            ClassType.isSameGenericClass(resultType, ClassType.cloneAsInstance(unexpandedSubtype)) &&
+                            unexpandedSubtype.shared.typeParams.some(
+                                (param) => isTypeVar(param) && param.shared.boundType
+                            )
+                        ) {
+                            resultType = specializeBoundedMatchTypeParams(
+                                evaluator,
+                                unexpandedSubtype,
+                                resultType.priv.typeArgs,
+                                getTypeCondition(subjectSubtypeExpanded)
+                            );
                         }
 
                         // Are there any positional arguments? If so, try to get the mappings for
@@ -1423,6 +1517,10 @@ function getSequencePatternInfo(
                     // If the tuple contains an indeterminate entry, expand or remove that
                     // entry to match the length of the pattern if possible.
                     let expandedIndeterminate = false;
+                    // Tracks whether the indeterminate entry was spliced out to contract the tuple
+                    // to fit a shorter pattern. This preserves "potential match" semantics after
+                    // the splice resets tupleIndeterminateIndex to -1.
+                    let removedIndeterminate = false;
                     if (tupleIndeterminateIndex >= 0) {
                         tupleDeterminateEntryCount--;
 
@@ -1435,7 +1533,9 @@ function getSequencePatternInfo(
 
                         if (typeArgs.length > patternEntryCount && patternStarEntryIndex === undefined) {
                             typeArgs.splice(tupleIndeterminateIndex, 1);
+                            removedIndeterminate = true;
                             tupleIndeterminateIndex = -1;
+                            removedIndeterminate = true;
                         }
                     }
 
@@ -1472,7 +1572,14 @@ function getSequencePatternInfo(
 
                     if (typeArgs.length === patternEntryCount) {
                         let isDefiniteNoMatch = false;
-                        let isPotentialNoMatch = tupleIndeterminateIndex >= 0;
+                        let isPotentialNoMatch = tupleIndeterminateIndex >= 0 || removedIndeterminate;
+
+                        // If we removed an unbounded entry to make the lengths match,
+                        // this is a potential match (not definite) because the original
+                        // tuple could have different lengths.
+                        if (removedIndeterminate) {
+                            isPotentialNoMatch = true;
+                        }
 
                         // If the pattern includes a "star entry" and the tuple includes an
                         // indeterminate-length entry that aligns to the star entry, we can
@@ -1507,7 +1614,7 @@ function getSequencePatternInfo(
                             entryTypes: isDefiniteNoMatch ? [] : typeArgs.map((t) => t.type),
                             isIndeterminateLength: false,
                             isTuple: true,
-                            isUnboundedTuple: tupleIndeterminateIndex >= 0,
+                            isUnboundedTuple: removedIndeterminate || tupleIndeterminateIndex >= 0,
                             isDefiniteNoMatch,
                             isPotentialNoMatch,
                         });

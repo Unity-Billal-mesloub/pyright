@@ -234,9 +234,9 @@ export interface AddConditionOptions {
 
 // There are cases where tuple types can be infinitely nested. The
 // recursion count limit will eventually be hit, but this will create
-// deep types that will effectively hang the analyzer. To prevent this,
-// we'll limit the depth of the tuple type arguments. This value is
-// large enough that we should never hit it in legitimate circumstances.
+// deep types that are expensive to construct. As a performance safeguard,
+// we limit the depth of the tuple type arguments. This value is large
+// enough that we should never hit it in legitimate circumstances.
 const maxTupleTypeArgRecursionDepth = 10;
 
 // Tracks whether a function signature has been seen before within
@@ -1397,15 +1397,41 @@ export function isMaybeDescriptorInstance(type: Type, requireSetter = false): bo
         return false;
     }
 
-    if (!ClassType.getSymbolTable(type).has('__get__')) {
+    // Traverse MRO so descriptor subclasses are detected
+    const getMember = lookUpObjectMember(type, '__get__');
+    if (!getMember) {
         return false;
     }
 
-    if (requireSetter && !ClassType.getSymbolTable(type).has('__set__')) {
-        return false;
+    if (requireSetter) {
+        const setMember = lookUpObjectMember(type, '__set__');
+        if (!setMember) {
+            return false;
+        }
     }
 
     return true;
+}
+
+// Checks whether an instantiable class type (i.e. the class itself, not an instance of it)
+// is a descriptor class — one that defines __get__. This is the counterpart to
+// isMaybeDescriptorInstance: that function handles declared types in instance form
+// (ClassInstance), while this one handles declared types in instantiable form
+// (InstantiableClass), which occurs when a type annotation refers to the class object itself.
+// Unlike isMaybeDescriptorInstance, which uses lookUpObjectMember (which only produces
+// results for ClassInstance arguments), this function calls lookUpClassMember directly —
+// because lookUpObjectMember returns undefined for non-ClassInstance types, making it
+// unsuitable for the InstantiableClass argument this function receives.
+export function isMaybeDescriptorClass(type: Type): boolean {
+    if (isUnion(type)) {
+        return type.priv.subtypes.some((subtype) => isMaybeDescriptorClass(subtype));
+    }
+
+    if (!isInstantiableClass(type)) {
+        return false;
+    }
+
+    return !!lookUpClassMember(type, '__get__');
 }
 
 export function isTupleGradualForm(type: Type) {
@@ -1416,6 +1442,17 @@ export function isTupleGradualForm(type: Type) {
         type.priv.tupleTypeArgs.length === 1 &&
         isAnyOrUnknown(type.priv.tupleTypeArgs[0].type) &&
         type.priv.tupleTypeArgs[0].isUnbounded
+    );
+}
+
+// Returns true for classes that are generic in stubs but not subscriptable
+// at runtime (e.g. operator.attrgetter, operator.itemgetter). These lack
+// __class_getitem__ and are not builtins.
+export function isStubOnlySubscriptable(classType: ClassType) {
+    return (
+        ClassType.isDefinedInStub(classType) &&
+        !ClassType.isBuiltIn(classType) &&
+        !classType.shared.fields.has('__class_getitem__')
     );
 }
 
@@ -1492,7 +1529,7 @@ export function partiallySpecializeType(
                         contextClassType,
                         typeClassType,
                         selfClass
-                    ) as FunctionType,
+                    ) as FunctionType | OverloadedType,
                     classType: methodInfo.classType,
                 };
             }
@@ -3697,7 +3734,13 @@ export class TypeVarTransformer {
 
         // Handle tuples specially.
         if (ClassType.isTupleClass(classType)) {
-            if (getContainerDepth(classType) > maxTupleTypeArgRecursionDepth) {
+            // As a performance safeguard, bail out early on very deeply nested
+            // tuples (the recursion count limit would eventually stop us, but
+            // constructing such deep types is expensive). Only do this when there
+            // are no type variables left to substitute; bailing out while type
+            // variables remain would return the unspecialized class and let those
+            // TypeVars "escape" unsolved (see microsoft/pyright#11472).
+            if (getContainerDepth(classType) > maxTupleTypeArgRecursionDepth && !requiresSpecialization(classType)) {
                 return classType;
             }
 

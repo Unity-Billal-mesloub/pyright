@@ -21,6 +21,7 @@ import {
 } from 'vscode-languageserver';
 
 import { getFileInfo } from '../analyzer/analyzerNodeInfo';
+import { DeclarationType } from '../analyzer/declaration';
 import { getParamListDetails, ParamKind } from '../analyzer/parameterUtils';
 import * as ParseTreeUtils from '../analyzer/parseTreeUtils';
 import { getCallNodeAndActiveParamIndex } from '../analyzer/parseTreeUtils';
@@ -28,16 +29,29 @@ import { SourceMapper } from '../analyzer/sourceMapper';
 import { isBuiltInModule } from '../analyzer/typeDocStringUtils';
 import { CallSignature, TypeEvaluator } from '../analyzer/typeEvaluatorTypes';
 import { PrintTypeFlags } from '../analyzer/typePrinter';
+import {
+    FunctionParam,
+    FunctionType,
+    isFunction,
+    isOverloaded,
+    isPositionOnlySeparator,
+    OverloadedType,
+} from '../analyzer/types';
 import { throwIfCancellationRequested } from '../common/cancellationUtils';
 import { DocStringService } from '../common/docStringService';
 import { ProgramView } from '../common/extensibility';
 import { convertPositionToOffset } from '../common/positionUtils';
-import { Position } from '../common/textRange';
+import { Position, TextRange } from '../common/textRange';
 import { Uri } from '../common/uri/uri';
-import { CallNode, NameNode, ParseNodeType } from '../parser/parseNodes';
+import { ArgCategory, CallNode, NameNode, ParseNodeType } from '../parser/parseNodes';
 import { ParseFileResults } from '../parser/parser';
 import { Tokenizer } from '../parser/tokenizer';
-import { getDocumentationPartsForTypeAndDecl, getFunctionDocStringFromType } from './tooltipUtils';
+import { TokenType } from '../parser/tokenizerTypes';
+import {
+    getDocumentationPartsForTypeAndDecl,
+    getFunctionDocStringFromType,
+    replaceStubEllipsisDefaultValues,
+} from './tooltipUtils';
 
 export class SignatureHelpProvider {
     private readonly _parseResults: ParseFileResults | undefined;
@@ -74,6 +88,20 @@ export class SignatureHelpProvider {
 
         const offset = convertPositionToOffset(this._position, this._parseResults.tokenizerOutput.lines);
         if (offset === undefined) {
+            return undefined;
+        }
+
+        // Suppress signature help when the cursor is strictly inside string literal content.
+        // Strict-inside (offset > token.start && offset < end) ensures we don't suppress at
+        // either the opening-quote boundary (e.g. `key1=|'r'`) or the closing-quote boundary
+        // (e.g. `foo("text"|)`).
+        const token = ParseTreeUtils.getTokenOverlapping(this._parseResults.tokenizerOutput.tokens, offset);
+        if (
+            token &&
+            (token.type === TokenType.String || token.type === TokenType.FStringMiddle) &&
+            offset > token.start &&
+            TextRange.contains(token, offset)
+        ) {
             return undefined;
         }
 
@@ -227,8 +255,15 @@ export class SignatureHelpProvider {
     }
 
     private _makeSignature(callNode: CallNode, signature: CallSignature): SignatureInfo {
-        const functionType = signature.type;
-        const stringParts = this._evaluator.printFunctionParts(functionType, PrintTypeFlags.ExpandTypedDictArgs);
+        let functionType = signature.type;
+        // Check if this is a function decorated with @functools.wraps and extract the wrapped function type if so.
+        const wrappedFunctionType = this._getWrappedFunctionType(callNode, functionType);
+        if (wrappedFunctionType) {
+            functionType = wrappedFunctionType;
+        }
+
+        let stringParts = this._evaluator.printFunctionParts(functionType, PrintTypeFlags.ExpandTypedDictArgs);
+        stringParts = replaceStubEllipsisDefaultValues(functionType, stringParts, this._sourceMapper);
         const parameters: ParamInfo[] = [];
         const functionDocString =
             getFunctionDocStringFromType(functionType, this._sourceMapper, this._evaluator) ??
@@ -241,13 +276,31 @@ export class SignatureHelpProvider {
         let activeParameter: number | undefined;
         const params = functionType.shared.parameters;
 
-        stringParts[0].forEach((paramString: string, paramIndex) => {
-            let paramName = '';
-            if (paramIndex < params.length) {
-                paramName = params[paramIndex].name || '';
-            } else if (params.length > 0) {
-                paramName = params[params.length - 1].name || '';
+        // printFunctionParts omits some parameters from its printed output. In particular, a
+        // positional-only "/" separator is omitted when no named parameter precedes it (e.g. on a
+        // bound method where `self` has been removed, leaving the "/" as the first parameter).
+        // Build a map from each printed parameter string back to its source parameter so that
+        // active-parameter highlighting and name/doc lookups stay aligned.
+        const printIndexToParamIndex: number[] = [];
+        let sawNamedParam = false;
+        params.forEach((param, index) => {
+            if (isPositionOnlySeparator(param) && !sawNamedParam) {
+                return;
             }
+            if (param.name && !FunctionParam.isNameSynthesized(param)) {
+                sawNamedParam = true;
+            }
+            printIndexToParamIndex.push(index);
+        });
+
+        const getParamForPrintIndex = (printIndex: number) => {
+            const mappedIndex =
+                printIndex < printIndexToParamIndex.length ? printIndexToParamIndex[printIndex] : params.length - 1;
+            return mappedIndex >= 0 && mappedIndex < params.length ? params[mappedIndex] : undefined;
+        };
+
+        stringParts[0].forEach((paramString: string, paramIndex) => {
+            const paramName = getParamForPrintIndex(paramIndex)?.name || '';
 
             const isKeywordOnly = paramListDetails.params.some(
                 (param) => param.param.name === paramName && param.kind === ParamKind.Keyword
@@ -278,7 +331,8 @@ export class SignatureHelpProvider {
         label += ') -> ' + stringParts[1];
 
         if (signature.activeParam && activeParameter === undefined) {
-            activeParameter = params.indexOf(signature.activeParam);
+            const sourceParamIndex = params.indexOf(signature.activeParam);
+            activeParameter = sourceParamIndex >= 0 ? printIndexToParamIndex.indexOf(sourceParamIndex) : -1;
             if (activeParameter === -1) {
                 activeParameter = undefined;
             }
@@ -287,10 +341,11 @@ export class SignatureHelpProvider {
         // Extract the documentation only for the active parameter.
         if (activeParameter !== undefined) {
             const activeParam = parameters[activeParameter];
-            if (activeParam) {
+            const sourceParam = getParamForPrintIndex(activeParameter);
+            if (activeParam && sourceParam) {
                 activeParam.documentation = this._docStringService.extractParameterDocumentation(
                     functionDocString || '',
-                    params[activeParameter].name || '',
+                    sourceParam.name || '',
                     this._format
                 );
             }
@@ -320,6 +375,86 @@ export class SignatureHelpProvider {
         }
 
         return sigInfo;
+    }
+
+    private _getWrappedFunctionType(callNode: CallNode, functionType: FunctionType): FunctionType | undefined {
+        // Try to get the declaration from the function type first
+        let decl = functionType.shared.declaration;
+
+        // If no declaration on the type, try to get it from the call node
+        if (!decl) {
+            let name: NameNode | undefined;
+            const expr = callNode.d.leftExpr;
+            if (expr.nodeType === ParseNodeType.Name) {
+                name = expr;
+            } else if (expr.nodeType === ParseNodeType.MemberAccess) {
+                name = expr.d.member;
+            }
+
+            if (name) {
+                const decls = this._evaluator.getDeclInfoForNameNode(name)?.decls ?? [];
+                for (const d of decls) {
+                    const resolvedDecl = this._evaluator.resolveAliasDeclaration(d, /* resolveLocalNames */ true);
+                    if (resolvedDecl && resolvedDecl.type === DeclarationType.Function) {
+                        decl = resolvedDecl;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!decl || decl.node.nodeType !== ParseNodeType.Function) {
+            return undefined;
+        }
+
+        const functionNode = decl.node;
+
+        // Look for @functools.wraps decorator (in any position).
+        for (const decoratorNode of functionNode.d.decorators) {
+            if (decoratorNode.d.expr.nodeType !== ParseNodeType.Call) {
+                continue;
+            }
+
+            const decoratorCall = decoratorNode.d.expr;
+            const decoratorType = this._evaluator.getType(decoratorCall.d.leftExpr);
+            if (!decoratorType || !isFunction(decoratorType)) {
+                continue;
+            }
+
+            if (decoratorType.shared.moduleName !== 'functools' || decoratorType.shared.name !== 'wraps') {
+                continue;
+            }
+
+            const wrappedFuncArg = decoratorCall.d.args.length > 0 ? decoratorCall.d.args[0] : undefined;
+            if (!wrappedFuncArg || wrappedFuncArg.d.argCategory !== ArgCategory.Simple || !wrappedFuncArg.d.valueExpr) {
+                continue;
+            }
+
+            const wrappedFuncType = this._evaluator.getType(wrappedFuncArg.d.valueExpr);
+            if (!wrappedFuncType) {
+                continue;
+            }
+
+            // Return the wrapped function type if it's a function
+            if (isFunction(wrappedFuncType)) {
+                return wrappedFuncType;
+            }
+
+            // If it's overloaded, return the implementation or first overload
+            if (isOverloaded(wrappedFuncType)) {
+                const impl = OverloadedType.getImplementation(wrappedFuncType);
+                if (impl && isFunction(impl)) {
+                    return impl;
+                }
+
+                const overloads = OverloadedType.getOverloads(wrappedFuncType);
+                if (overloads.length > 0) {
+                    return overloads[0];
+                }
+            }
+        }
+
+        return undefined;
     }
 
     private _getDocStringFromCallNode(callNode: CallNode): string | undefined {
