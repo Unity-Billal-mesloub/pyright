@@ -26,9 +26,5 @@ If Pyright fails to create a temporary directory (for example in remote/server e
 Pyright otherwise relies on the platform temp directory (for example `TMPDIR`, `TMP`, `TEMP`, or the OS default).
 
 
-## Community
-Do you have questions about Pyright or Python type annotations in general? Post your questions in [the discussion section](https://github.com/Unity-Billal-mesloub/pyright/discussions).
-
-If you would like to report a bug or request an enhancement, file a new issue in either the [pyright](https://github.com/Unity-Billal-mesloub/pyright/issues) or [pylance-release](https://github.com/Unity-Billal-mesloub/pylance-release/issues) issue tracker. In general, core type checking functionality is associated with Pyright while language service functionality is associated with Pylance, but the same contributors monitor both repos. For best results, provide the information requested in the issue template.
 
 
